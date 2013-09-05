@@ -1,0 +1,10 @@
+#!/bin/bash
+
+   ovs-dpctl dump-flows system@ovs-system
+
+
+
+wait
+
+
+exit 0

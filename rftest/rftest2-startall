@@ -1,0 +1,24 @@
+#!/bin/bash
+
+echo_bold() {
+    echo -e "\033[1m${1}\033[0m"
+}
+
+lxc-start -n rfvmA -d
+lxc-start -n rfvmB -d
+
+
+echo_bold "-> Starting the control plane network (dp0 VS)..."
+ovs-vsctl add-br dp0
+ovs-vsctl set bridge dp0 protocols=OpenFlow13
+
+ovs-vsctl add-port dp0 rfvmA.1
+ovs-vsctl add-port dp0 rfvmA.2
+ovs-vsctl add-port dp0 rfvmB.1
+ovs-vsctl add-port dp0 rfvmB.2
+
+ovs-vsctl set Bridge dp0 other-config:datapath-id=7266767372667673
+ovs-vsctl set-controller dp0 tcp:127.0.0.1:$CONTROLLER_PORT
+#ifconfig dp0 up #no?????????????????????
+
+

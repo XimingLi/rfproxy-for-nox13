@@ -1,0 +1,5 @@
+vm_id,vm_port,ct_id,dp_id,dp_port
+2A0A0A0A0A0,1,0,99,1
+2A0A0A0A0A0,2,0,99,2
+2B0B0B0B0B0,1,0,98,1
+2B0B0B0B0B0,2,0,98,2

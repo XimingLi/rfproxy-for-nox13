@@ -1,0 +1,25 @@
+#!/bin/bash
+
+echo_bold() {
+    echo -e "\033[1m${1}\033[0m"
+}
+
+lxc-start -n rfvm1 -d
+
+ovs-vsctl add-br dp0
+
+
+ovs-vsctl set bridge dp0 protocols=OpenFlow13
+echo_bold "1"
+ovs-vsctl add-port dp0 rfvm1.1
+echo_bold "2"
+ovs-vsctl add-port dp0 rfvm1.2
+echo_bold "3"
+ovs-vsctl set bridge dp0 other-config:datapath-id=7266767372667673
+#ovs-vsctl set bridge dp0 other-config:datapath-id=72667673abababab
+echo_bold "4"
+ovs-vsctl set-controller dp0 tcp:127.0.0.1:$CONTROLLER_PORT
+echo_bold "5"
+ifconfig dp0 up
+echo_bold "6"
+

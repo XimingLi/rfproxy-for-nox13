@@ -1,0 +1,21 @@
+#!/bin/bash
+
+echo_bold() {
+    echo -e "\033[1m${1}\033[0m"
+}
+
+
+echo_bold "1"
+lxc-stop -n rfvm1
+
+echo_bold "4"
+ovs-vsctl del-port dp0 rfvm1.1
+echo_bold "3"
+ovs-vsctl del-port dp0 rfvm1.2
+echo_bold "2"
+#lxc-stop -n rfvm1
+#echo_bold "1"
+#ovs-vsctl add-br dp0
+
+
+

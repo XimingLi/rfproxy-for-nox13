@@ -1,0 +1,13 @@
+password routeflow
+enable password routeflow
+!
+log file /var/log/quagga/zebra.log
+password 123
+enable password 123
+!
+interface eth1
+        ip address 40.0.0.2/24
+!
+interface eth2
+        ip address 30.0.0.2/24
+!

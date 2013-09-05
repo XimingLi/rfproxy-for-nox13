@@ -1,0 +1,30 @@
+[1m-> Starting rftest1[0m
+[1m-> Stopping and resetting LXC VMs...[0m
+rfvm1 is not running
+[1m-> Deleting data from previous runs...[0m
+MongoDB shell version: 2.0.4
+connecting to: db
+false
+[1m-> Setting up the management bridge (lxcbr0)...[0m
+[1m-> Setting up MongoDB...[0m
+mongodb stop/waiting
+mongodb start/running, process 14623
+.[1m-> Starting the rfvm1 virtual machine...[0m
+[1m-> Starting the controller NOX13 and RFPRoxy...[0m
+[1m-> Successfully start NOX13...[0m
+/home/lmm/RouteFlow
+.[1m-> Starting RFServer...[0m
+[1m-> Starting the control plane network (dp0 VS)...[0m
+[1m1[0m
+[1m2[0m
+[1m3[0m
+[1m4[0m
+[1m5[0m
+[1m6[0m
+[1m-> Starting the sample network...[0m
+[1m-> Stopping child processes...[0m
+[1m-> Stopping and resetting LXC VMs...[0m
+[1m-> Deleting data from previous runs...[0m
+MongoDB shell version: 2.0.4
+connecting to: db
+true

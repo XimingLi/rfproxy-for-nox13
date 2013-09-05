@@ -1,0 +1,29 @@
+#!/bin/bash
+
+if [ "$EUID" != "0" ]; then
+  echo "You must be root to run this script. Sorry, dude!"
+  exit 1
+fi
+
+LXCDIR="/var/lib/lxc"
+CONFIG="config"
+
+# Setup LXC and base container
+apt-get -y --force-yes install lxc
+mkdir -p $LXCDIR
+lxc-create -t ubuntu -n base
+
+chroot $LXCDIR/base/rootfs apt-get update
+# !!!
+# ADD THE PACKETS YOU NEED TO INSTALL HERE
+# !!!
+chroot $LXCDIR/base/rootfs apt-get -y --force-yes install quagga libboost-thread-dev libboost-system-dev libboost-filesystem-dev libboost-program-options-dev rsyslog vlan tcpdump
+# !!!
+
+# Clone the base container to make other containers based on config
+cd $CONFIG
+for VM in *
+do
+    lxc-clone -o base -n $VM
+    cp -R $VM/* $LXCDIR/$VM
+done

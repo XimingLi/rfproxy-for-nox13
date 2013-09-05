@@ -1,0 +1,582 @@
+#include <stdint.h>
+#include <map>
+#include <string>
+#include <linux/if_ether.h>
+
+#include <boost/thread/mutex.hpp>
+#include <boost/bind.hpp>
+
+#include "rfproxy.hh"
+#include "assert.hh"
+#include "component.hh"
+#include "vlog.hh"
+#include "datapath-join.hh"
+#include "datapath-leave.hh"
+#include "buffer.hh"
+#include "flow.hh"
+#include "netinet++/ethernet.hh"
+//#include "packets.h"
+
+//the following .h are copyed from component SWITCH
+#include "openflow-default.hh"
+#include "fnv_hash.hh"
+#include "hash_set.hh"
+#include "ofp-msg-event.hh"
+#include "flowmod.hh"
+
+
+#include "MongoIPC.h"
+#include "RFProtocol.h"
+#include "RFProtocolFactory.h"
+#include "converter.h"
+#include "defs.h"
+//#include "openflow/openflow.h"
+//the followings are maybe needed
+#include "../../../oflib/ofl-actions.h"
+#include "../../../oflib/ofl-messages.h"
+//#include "../../../oflib/ofl.h"
+//#include "../../../oflib/ofl-packets.h"
+//#include "../../../oflib/ofl-structs.h"
+//#include "../../../oflib/ofl-utils.h"
+//#include "../../../oflib/oxm-match.h"
+#include <mongo/client/dbclient.h>
+
+#define FAILURE 0
+#define SUCCESS 1
+
+#define OFP_BUFFER_NONE 0xffffffff
+
+// TODO: proper support for ID
+#define ID 0
+
+namespace vigil {
+
+static Vlog_module lg("rfproxy");
+
+boost::mutex sendPacketMutex;
+
+//move all from OFInterface.cc to here below
+
+/**
+ * Convert the RouteFlow Match to an OpenFlow match
+ *
+ * Returns -1 on failure.
+ */
+int add_match(Flow *f, const Match& match) {
+    int error = 0;
+
+    switch (match.getType()) {
+        case RFMT_IPV4: {
+            const in_addr* address = static_cast<const in_addr*>
+                                     (match.getIPAddress());
+			/*
+			const in_addr* mask = static_cast<const in_addr*>
+                                  (match.getIPMask());
+
+            		if (address == NULL || mask == NULL) {
+                		error = -1;
+                		break;
+            		}
+            		*/
+            if(address == NULL) {
+
+				error = -1;
+				break;
+            }
+
+            //int32_t ofp_mask = ofp_get_mask(*mask, OFPFW_NW_DST_SHIFT);
+
+            //ofm_match_dl(ofm, OFPFW_DL_TYPE, ETHERTYPE_IP, 0, 0);
+			f->Add_Field("eth_type", ethernet::IP);
+            //ofm_match_nw(ofm, ofp_mask, 0, 0, 0, address->s_addr);
+			f->Add_Field("ipv4_dst", address->s_addr);
+            break;
+        }
+        case RFMT_ETHERNET:
+            //ofm_match_dl(ofm, OFPFW_DL_DST, 0, 0, match.getValue());
+            f->Add_Field("eth_dst", match.getValue());
+            break;
+        case RFMT_ETHERTYPE:
+            //ofm_match_dl(ofm, OFPFW_DL_TYPE, match.getUint16(), 0, 0);
+			f->Add_Field("eth_type", match.getUint16());
+            break;
+        case RFMT_NW_PROTO:
+            //ofm_match_nw(ofm, OFPFW_NW_PROTO, match.getUint8(), 0, 0, 0);
+            f->Add_Field("ip_proto", match.getUint8());
+            break;
+        case RFMT_TP_SRC:
+            //ofm_match_tp(ofm, OFPFW_TP_SRC, match.getUint16(), 0);
+			f->Add_Field("tcp_src", match.getUint16());
+            break;
+        case RFMT_TP_DST:
+            //ofm_match_tp(ofm, OFPFW_TP_DST, 0, match.getUint16());
+			f->Add_Field("tcp_dst", match.getUint16());
+            break;
+        case RFMT_IN_PORT:
+            //ofm_match_in(ofm, static_cast<uint16_t>(match.getUint32()));
+			f->Add_Field("in_phy_port", static_cast<uint16_t>(match.getUint32()));
+            break;
+        case RFMT_IPV6://T.B.D.
+        case RFMT_MPLS://T.B.D.
+            // Not implemented in OpenFlow 1.0.
+        default:
+            error = -1;
+            break;
+    }
+
+    return error;
+}
+
+/**
+ * Convert the RouteFlow Action to an OpenFlow Action
+ *
+ * Returns -1 on failure.
+ */
+int add_action(Actions *acts, const Action& action) {
+    int error = 0;
+    //ofp_action_header *oah = reinterpret_cast<ofp_action_header*>(buf);
+
+    switch (action.getType()) {
+        case RFAT_OUTPUT:
+            //ofm_set_action(oah, OFPAT_OUTPUT, action.getUint16(), 0);
+			acts->CreateOutput(action.getUint16());
+            break;
+        case RFAT_SET_ETH_SRC:
+            //ofm_set_action(oah, OFPAT_SET_DL_SRC, 0, action.getValue());
+			acts->CreateSetField("eth_src", action.getValue());
+            break;
+        case RFAT_SET_ETH_DST:
+            //ofm_set_action(oah, OFPAT_SET_DL_DST, 0, action.getValue());
+			acts->CreateSetField("eth_dst", action.getValue());
+			break;
+		// the following are T.B.D.
+        case RFAT_PUSH_MPLS:
+        case RFAT_POP_MPLS:
+        case RFAT_SWAP_MPLS:
+            // Not implemented in OpenFlow 1.0. 
+        default:
+            error = -1;
+            break;
+    }
+
+    return error;
+}
+
+
+/**
+ * Convert the RouteFlow Option to an OpenFlow field
+ *
+ * Returns -1 on failure.
+ */
+ //In this function is htons needed??????????????????????????????????
+int add_option(FlowMod *fmod, const Option& option) {
+    int error = 0;
+
+    switch (option.getType()) {
+        case RFOT_PRIORITY:
+            //ofm->priority = htons(option.getUint16());
+			fmod->fm_msg.priority = option.getUint16();
+            break;
+        case RFOT_IDLE_TIMEOUT:
+            //ofm->idle_timeout = htons(option.getUint16());
+			fmod->fm_msg.idle_timeout = option.getUint16();
+            break;
+        case RFOT_HARD_TIMEOUT:
+            //ofm->hard_timeout = htons(option.getUint16());
+			fmod->fm_msg.idle_timeout = option.getUint16();
+            break;
+        case RFOT_CT_ID:
+            /* Ignore. */
+            break;
+        default:
+            /* Unsupported Option. */
+            error = -1;
+            break;
+    }
+
+    return error;
+}
+
+void log_error(std::string type, bool optional) {
+    if (optional) {
+        VLOG_DBG(lg, "Dropping unsupported TLV (type: %s)", type.c_str());
+    } else {
+        VLOG_ERR(lg, "Failed to serialise TLV (type: %s)", type.c_str());
+    }
+}
+
+FlowMod *create_flow_mod(uint8_t mod,
+            std::vector<Match> matches, std::vector<Action> actions,
+            std::vector<Option> options) {
+    int error = 0;
+/*
+	ofp_flow_mod *ofm;
+    size_t size = sizeof *ofm + ofp_match_len(matches)
+                  + ofp_action_len(actions);
+
+    boost::shared_array<uint8_t> raw_of(new uint8_t[size]);
+    ofm = reinterpret_cast<ofp_flow_mod*>(raw_of.get());
+    ofm_init(ofm, size);
+
+    uint8_t* oah = reinterpret_cast<uint8_t*>(ofm->actions);
+*/
+	FlowMod *fmod = new FlowMod();
+	Flow *f = new Flow();
+	Actions *acts = new Actions();
+	Instruction *inst =  new Instruction();
+
+	//FlowMod init
+	//cookie, cookie_mask, table_id, out_group, flags are left
+	fmod->fm_msg.cookie = 0x00ULL;
+	fmod->fm_msg.cookie_mask = 0x00ULL;
+	fmod->fm_msg.table_id = 0;
+	fmod->fm_msg.out_group = OFPP_ANY;
+	fmod->fm_msg.flags = ofd_flow_mod_flags();
+	fmod->fm_msg.priority = OFP_DEFAULT_PRIORITY;
+	//Whether idle_timeout and hard_timeout should be init here?
+	
+
+    std::vector<Match>::iterator iter_mat;
+    for (iter_mat = matches.begin(); iter_mat != matches.end(); ++iter_mat) {
+        if (add_match(f, *iter_mat) != 0) {
+            log_error(iter_mat->type_to_string(), iter_mat->optional());
+            if (!iter_mat->optional()) {
+                error = -1;
+                break;
+            }
+        }
+    }
+
+    std::vector<Action>::iterator iter_act;
+    for (iter_act = actions.begin(); iter_act != actions.end(); ++iter_act) {
+        if (add_action(acts, *iter_act) != 0) {
+            log_error(iter_act->type_to_string(), iter_act->optional());
+            if (!iter_act->optional()) {
+                error = -1;
+                break;
+            }
+        }
+        //oah += ofp_len(*iter_act);
+    }
+
+	inst->CreateApply(acts);
+	//set act and match fields.
+	fmod->AddInstructions(inst);
+	fmod->AddMatch(&f->match);
+
+	//the following set the priority, idle_timeout and hard_timeout fields
+    std::vector<Option>::iterator iter_opt;
+    for (iter_opt = options.begin(); iter_opt != options.end(); ++iter_opt) {
+        if (add_option(fmod, *iter_opt) != 0) {
+            log_error(iter_opt->type_to_string(), iter_opt->optional());
+            if (!iter_opt->optional()) {
+                error = -1;
+                break;
+            }
+        }
+    }
+
+	//we then should assign for other fields of a FlowMod
+	//a complete FlowMod maybe like this:
+	//mod = new FlowMod(0x00ULL,0x00ULL, 0,OFPFC_ADD, OFP_FLOW_PERMANENT, OFP_FLOW_PERMANENT, 0, 0, OFPP_ANY, OFPG_ANY, ofd_flow_mod_flags());
+    switch (mod) {
+        case RMT_ADD:
+            //ofm_set_command(ofm, OFPFC_ADD);
+			fmod->fm_msg.command = OFPFC_ADD;
+			fmod->fm_msg.buffer_id = OFP_BUFFER_NONE;
+			fmod->fm_msg.idle_timeout = OFP_FLOW_PERMANENT;
+			fmod->fm_msg.hard_timeout = OFP_FLOW_PERMANENT;
+			fmod->fm_msg.out_port = OFPP_ANY; //this is different with the former version, in which it is OFPP_NONE 
+            break;
+        case RMT_DELETE:
+            //ofm_set_command(ofm, OFPFC_DELETE_STRICT);
+			fmod->fm_msg.command = OFPFC_DELETE_STRICT;
+			fmod->fm_msg.buffer_id = OFP_BUFFER_NONE;
+			fmod->fm_msg.idle_timeout = OFP_FLOW_PERMANENT;
+			fmod->fm_msg.hard_timeout = OFP_FLOW_PERMANENT;
+			fmod->fm_msg.out_port = OFPP_ANY; //this is different with the former version, in which it is OFPP_NONE 
+            break;
+        default:
+            VLOG_ERR(lg, "Unrecognised RouteModType (type: %d)", mod);
+            error = -1;
+            break;
+    }
+
+	//ofm_init(ofp_flow_mod * ofm,size_t size);
+	
+    if (error != 0) {
+        return NULL;
+    }
+
+    return fmod;
+}
+
+
+// Base functions
+bool rfproxy::send_of_msg(uint64_t dp_id, FlowMod *fmod) {
+    boost::lock_guard<boost::mutex> lock(sendPacketMutex);
+	//Modified by XML
+	//if (send_openflow_command(datapathid::from_host(dp_id), (ofp_header*) msg, true))
+    if (send_openflow_msg(datapathid::from_host(dp_id), (struct ofl_msg_header *)&(fmod->fm_msg), 0/*xid*/, true/*block*/))
+        return FAILURE;
+    else
+        return SUCCESS;
+}
+/*
+bool rfproxy::send_packet_out(uint64_t dp_id, uint32_t port, Buffer& data) {
+    boost::lock_guard<boost::mutex> lock(sendPacketMutex);
+    //if (send_openflow_pkt(datapathid::from_host(dp_id), data, port, OFPP_NONE, true))
+	if(send_openflow_pkt(datapathid::from_host(dp_id), data, port,
+                             OFPP_NONE, true))
+        return FAILURE;
+    else
+        return SUCCESS;
+}
+*/
+bool rfproxy::send_packet_out(uint64_t dp_id, uint32_t port, uint32_t buffer_id) {
+    boost::lock_guard<boost::mutex> lock(sendPacketMutex);
+    //if (send_openflow_pkt(datapathid::from_host(dp_id), data, port, OFPP_NONE, true))
+	if(send_openflow_pkt(datapathid::from_host(dp_id), buffer_id, OFPP_ANY, port, true))//datapathid::from_host(dp_id) right????????????????????
+        return FAILURE;
+    else
+        return SUCCESS;
+}
+
+// Event handlers
+Disposition rfproxy::on_datapath_up(const Event& e) {
+/*
+    const Datapath_join_event& dj = assert_cast<const Datapath_join_event&> (e);
+
+    for (int i = 0; i < dj.ports.size(); i++) {
+        if (dj.ports[i].port_no <= OFPP_MAX) {
+            DatapathPortRegister msg(ID, dj.dpid.as_host(), dj.ports[i].port_no);
+            ipc->send(RFSERVER_RFPROXY_CHANNEL, RFSERVER_ID, msg);
+
+            VLOG_INFO(lg,
+                      "Registering datapath port (dp_id=%0#"PRIx64", dp_port=%d)",
+                      dj.dpid.as_host(),
+                      dj.ports[i].port_no);
+        }
+    }
+*/
+	lg.dbg("In rfproxy, received a Datapath_join_event\n");
+	const Datapath_join_event& dpj = assert_cast<const Datapath_join_event&>(e);
+
+	if (dpj.dpid.as_host() > 0x0000ffffffffffffULL)
+		lg.warn("Joined DPID has no 0x0000 in upper 16-bits, so rfproxy will not work correctly");
+	
+	//Request the port infomation from the joined Dp.
+	VLOG_DBG(lg,"Request the port information from the dpid= 0x%"PRIx64"\n", dpj.dpid.as_host());
+	struct ofl_msg_multipart_request_port ommrpt;
+	ommrpt.header.header.type = OFPT_MULTIPART_REQUEST;
+	ommrpt.header.type = OFPMP_PORT_DESC;
+	ommrpt.header.flags = OFPMPF_REQ_MORE;
+	ommrpt.port_no = OFPP_ANY;
+	// need lock here?
+	
+	send_openflow_msg(dpj.dpid, (struct ofl_msg_header *)&ommrpt, 0/*xid*/, true/*block*/);
+    
+	return CONTINUE;
+}
+
+Disposition rfproxy::on_port_status_in(const Event& e) {
+
+	lg.dbg("In rfproxy, received a port_status event\n");
+	return CONTINUE;
+}
+
+Disposition rfproxy::on_port_description_in(const Event& e) {
+
+	lg.dbg("In rfproxy, received a port_description event\n");
+	const Ofp_msg_event& ome = assert_cast<const Ofp_msg_event&>(e);
+	struct ofl_msg_multipart_reply_port_desc *rpd = (struct ofl_msg_multipart_reply_port_desc *)**ome.msg;
+	
+	for (int i = 0; i < rpd->stats_num; i++) {
+
+		struct ofl_port *port_desc = *(rpd->stats+i);
+		if (port_desc->port_no <= OFPP_MAX) {
+			//Is ID OK here????????????????
+			DatapathPortRegister msg(ID, ome.dpid.as_host(), port_desc->port_no);//as_host() right??????????????
+            		//port_add(Port(ome.dpid, port_desc->port_no));
+			ipc->send(RFSERVER_RFPROXY_CHANNEL, RFSERVER_ID, msg);
+        	}
+	}
+	
+	return CONTINUE;
+}
+
+Disposition rfproxy::on_datapath_down(const Event& e) {
+
+	lg.dbg("In rfproxy, received a Datapath_leave_event\n");
+	const Datapath_leave_event& dl = assert_cast<const Datapath_leave_event&> (e);
+	uint64_t dp_id = dl.datapath_id.as_host();//as_host() right??????????????
+
+	VLOG_INFO(lg,
+        "Datapath is down (dp_id=%0#"PRIx64")",
+        dp_id);
+
+	// Delete internal entry
+	table.delete_dp(dp_id);
+
+	// Notify RFServer
+	DatapathDown dd(ID, dp_id);
+	ipc->send(RFSERVER_RFPROXY_CHANNEL, RFSERVER_ID, dd);
+
+	return CONTINUE;
+}
+
+Disposition rfproxy::on_packet_in(const Event& e) {
+    	
+	lg.dbg("In rfproxy, received a Packet_in event\n");
+
+	const Ofp_msg_event& ome = assert_cast<const Ofp_msg_event&>(e);
+	struct ofl_msg_packet_in *in = (struct ofl_msg_packet_in *)**ome.msg;
+
+	Flow *flow = new Flow((struct ofl_match*) in->match);
+
+	uint16_t _dl_type;
+	flow->get_Field<uint16_t>("eth_type",&_dl_type);
+	uint32_t _in_port;
+	flow->get_Field<uint32_t>("in_port", &_in_port);
+	uint8_t _nw_proto;
+	flow->get_Field<uint8_t>("ip_proto", &_nw_proto);
+	uint16_t _tcp_src;
+	flow->get_Field<uint16_t>("tcp_src", &_tcp_src);
+	uint32_t _ipv4_dst;
+	flow->get_Field<uint32_t>("ipv4_dst", &_ipv4_dst);
+	uint32_t _ipv4_src;
+	flow->get_Field<uint32_t>("ipv4_src", &_ipv4_src);
+	
+	uint64_t dp_id = ome.dpid.as_host();
+	uint32_t in_port = _in_port;
+	uint64_t vs_id = ome.dpid.as_host();
+	uint32_t vs_port = _in_port;
+
+	//uint8_t *p_data = in->data;
+
+	//Nonowning_buffer orig_buf(*ome.get_buffer());
+	//Buffer *buf = &orig_buf;
+
+	//Flow orig_flow(in_port, *buf);
+    //Flow *flow = &orig_flow;
+
+    // Drop all LLDP packets
+    if (_dl_type == ethernet::LLDP) {
+        return CONTINUE;
+    }
+
+    // If we have a mapping packet, inform RFServer through a Map message
+    if (_dl_type == htons(RF_ETH_PROTO)) {
+        //const eth_data* data = buf->try_pull<eth_data> ();
+        //right?????????????????????????????????????????????????????????????????????????????????
+	const eth_data* data = (struct eth_data *)in->data;
+		VLOG_INFO(lg,
+            "Received mapping packet (vm_id=%0#"PRIx64", vm_port=%d, vs_id=%0#"PRIx64", vs_port=%d)",
+            data->vm_id,
+            data->vm_port,
+            vs_id,
+            vs_port);
+
+        // Create a map message and send it
+        VirtualPlaneMap mapmsg;
+        mapmsg.set_vm_id(data->vm_id);
+        mapmsg.set_vm_port(data->vm_port);
+        mapmsg.set_vs_id(vs_id);
+        mapmsg.set_vs_port(vs_port);
+        ipc->send(RFSERVER_RFPROXY_CHANNEL, RFSERVER_ID, mapmsg);
+
+	return CONTINUE;
+	}
+
+    	// If the packet came from RFVS, redirect it to the right switch port
+    	if (IS_RFVS(dp_id)) {
+
+        	PORT dp_port = table.vs_port_to_dp_port(dp_id, in_port);
+        	if (dp_port != NONE)
+         		send_packet_out(dp_port.first, dp_port.second, in->buffer_id);//buffer_id is ok?
+        	else
+            		VLOG_DBG(lg, "Unmapped RFVS port (vs_id=%0#"PRIx64", vs_port=%d)",
+                     		dp_id, in_port);
+    	}
+   	// If the packet came from a switch, redirect it to the right RFVS port
+    	else {
+       		PORT vs_port = table.dp_port_to_vs_port(dp_id, in_port);
+        	if (vs_port != NONE)
+            		send_packet_out(vs_port.first, vs_port.second, in->buffer_id);//buffer_id is ok?
+        	else
+            		VLOG_DBG(lg, "Unmapped datapath port (vs_id=%0#"PRIx64", vs_port=%d)",
+                     	dp_id, in_port);
+    	}
+
+    	return CONTINUE;
+}
+
+// IPC message processing
+bool rfproxy::process(const string &from, const string &to,
+                      const string &channel, IPCMessage& msg) {
+	lg.dbg("In rfproxy.cc, Process called");
+
+	int type = msg.get_type();
+		lg.dbg("In process(), the type of the received msg is %d, 6 is ROUTE_MOD and 5 is DATA_PLANE_MAP", type);
+	if (type == ROUTE_MOD) {
+		RouteMod* rmmsg = static_cast<RouteMod*>(&msg);
+		/*
+        	boost::shared_array<uint8_t> ofmsg = create_flow_mod(rmmsg->get_mod(),
+                                    rmmsg->get_matches(),
+                                    rmmsg->get_actions(),
+                                    rmmsg->get_options());
+        	*/
+		FlowMod *fmod = create_flow_mod(rmmsg->get_mod(),
+                                    rmmsg->get_matches(),
+                                    rmmsg->get_actions(),
+                                    rmmsg->get_options());
+
+		if (fmod == NULL) {
+			VLOG_DBG(lg, "Failed to create OpenFlow FlowMod");
+        	} else {
+            		if(send_of_msg(rmmsg->get_id(), fmod))
+				VLOG_DBG(lg, "Successfully send out openflow msg");
+			else
+				VLOG_DBG(lg, "Fail to send out openflow msg");
+        	}
+
+    	}
+    	else if (type == DATA_PLANE_MAP) {
+		//dynamic_cast or static_cast ???
+		DataPlaneMap* dpmmsg = dynamic_cast<DataPlaneMap*>(&msg);
+        	table.update_dp_port(dpmmsg->get_dp_id(), dpmmsg->get_dp_port(),
+                             dpmmsg->get_vs_id(), dpmmsg->get_vs_port());
+    	}
+    	return true;
+}
+
+// Initialization
+void rfproxy::configure(const Configuration* c) {
+    lg.dbg("In rfproxy.cc, Configure called");
+}
+
+void rfproxy::install() {
+
+    lg.dbg("In rfproxy.cc, install(), Install called\n");
+    //lg.dbg("MONGO_ADDRESS, MONGO_DB_NAME, to_string<uint64_t>(ID) are %s, %s", MONGO_ADDRESS, MONGO_DB_NAME);
+    ipc = new MongoIPCMessageService(MONGO_ADDRESS, MONGO_DB_NAME, to_string<uint64_t>(ID));
+    //ipc = new MongoIPCMessageService(MONGO_ADDRESS, MONGO_DB_NAME, "0");
+    lg.dbg("In rfproxy, install(), ipc created\n");
+    factory = new RFProtocolFactory();
+    ipc->listen(RFSERVER_RFPROXY_CHANNEL, factory, this, false);
+
+    register_handler(Datapath_join_event::static_get_name(), boost::bind(&rfproxy::on_datapath_up, this, _1));
+    register_handler(Datapath_leave_event::static_get_name(), boost::bind(&rfproxy::on_datapath_down, this, _1));
+    register_handler(Ofp_msg_event::get_name(OFPT_PORT_STATUS), boost::bind(&rfproxy::on_port_status_in, this, _1));
+    register_handler(Ofp_msg_event::get_stats_name(OFPMP_PORT_DESC),boost::bind(&rfproxy::on_port_description_in, this, _1));
+    register_handler(Ofp_msg_event::get_name(OFPT_PACKET_IN), boost::bind(&rfproxy::on_packet_in, this, _1));
+}
+
+void rfproxy::getInstance(const Context* c, rfproxy*& component) {
+    component = dynamic_cast<rfproxy*>
+        (c->get_by_interface(container::Interface_description(
+            typeid(rfproxy).name())));
+}
+
+REGISTER_COMPONENT(Simple_component_factory<rfproxy>, rfproxy);
+}

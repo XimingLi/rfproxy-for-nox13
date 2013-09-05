@@ -1,0 +1,37 @@
+#!/bin/bash
+
+if [ "$EUID" != "0" ]; then
+  echo "You must be root to run this script."
+  exit 1
+fi
+
+SCRIPT_NAME="rftest1"
+LXCDIR=/var/lib/lxc
+MONGODB_CONF=/etc/mongodb.conf
+MONGODB_PORT=27017
+CONTROLLER_PORT=6633
+RF_HOME=..
+export PATH=$PATH:/usr/local/bin:/usr/local/sbin
+export PYTHONPATH=$PYTHONPATH:$RF_HOME
+
+cd $RF_HOME
+
+
+
+
+echo_bold "--------------"
+echo_bold "--------------"
+echo_bold "---rfclient---"
+./rftest/rfdb.py rfclient
+echo_bold "--------------"
+echo_bold "--------------"
+echo_bold "---rfproxy---"
+./rftest/rfdb.py rfproxy
+echo_bold "--------------"
+
+
+
+wait
+
+
+exit 0
